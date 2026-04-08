@@ -92,77 +92,39 @@ function getSession(){
   return{label:"Market Closed",color:"#475569",code:"closed"};
 }
 
-// ── API ──────────────────────────────────────────────────────────────────────
-
-async function fetchYahoo(ticker){
-  try{
-    const r=await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`,{signal:AbortSignal.timeout(8000)});
-    if(!r.ok) throw new Error();
-    const j=await r.json();
-    const m=j?.chart?.result?.[0]?.meta;
-    if(!m?.regularMarketPrice) throw new Error();
-    const price=m.regularMarketPrice, prev=m.chartPreviousClose??m.previousClose??null;
-    const chg=price&&prev?price-prev:null, chgPct=chg&&prev?(chg/prev)*100:null;
-    return{ticker,ok:true,src:"Yahoo",price,prev,chg,chgPct,
-      pre:m.preMarketPrice??null,after:m.postMarketPrice??null,
-      high:m.regularMarketDayHigh??null,low:m.regularMarketDayLow??null,vol:m.regularMarketVolume??null,
-      name:m.longName??m.shortName??ticker};
-  }catch(e){return{ticker,ok:false};}
-}
-
-async function fetchFinnhub(ticker){
-  try{
-    const r=await fetch(`${FINNHUB}/quote?symbol=${ticker}&token=${FKEY}`,{signal:AbortSignal.timeout(7000)});
-    if(!r.ok) throw new Error();
-    const d=await r.json();
-    if(!d.c||d.c===0) throw new Error();
-    return{ticker,ok:true,src:"Finnhub",price:d.c,prev:d.pc,chg:d.d,chgPct:d.dp,high:d.h,low:d.l,vol:null,pre:null,after:null};
-  }catch(e){return{ticker,ok:false};}
-}
+// ── API — Finnhub only (Yahoo blocks server requests) ────────────────────────
 
 async function fetchQuote(ticker){
-  const y=await fetchYahoo(ticker);
-  if(y.ok) return y;
-  return fetchFinnhub(ticker);
-}
-
-async function fetchNewsYahoo(tickers){
   try{
-    const url=`https://feeds.finance.yahoo.com/rss/2.0/headline?s=${tickers.slice(0,12).join(",")}&region=US&lang=en-US`;
-    const r=await fetch(url,{signal:AbortSignal.timeout(10000)});
-    if(!r.ok) throw new Error();
-    const text=await r.text();
-    const doc=new DOMParser().parseFromString(text,"text/xml");
-    return[...doc.querySelectorAll("item")].slice(0,40).map(item=>{
-      const title=item.querySelector("title")?.textContent??"";
-      const link =item.querySelector("link")?.textContent??"#";
-      const pub  =item.querySelector("pubDate")?.textContent??"";
-      const desc =item.querySelector("description")?.textContent?.replace(/<[^>]*>/g,"")??"";
-      const when =pub?new Date(pub):null;
-      const diff =when?Math.floor((Date.now()-when)/60000):0;
-      const ago  =diff<60?`${diff}m`:diff<1440?`${Math.floor(diff/60)}h`:`${Math.floor(diff/1440)}d`;
-      const hits =tickers.filter(t=>title.toUpperCase().includes(t)||desc.toUpperCase().includes(t));
-      const sent =/surge|soar|beat|win|gain|jump|rise|bull|record|rally|strong|boost/i.test(title)?"bullish"
-                 :/fall|drop|miss|cut|warn|bear|decline|weak|loss|slide|disappoint/i.test(title)?"bearish":"neutral";
-      return{title,link,ago,desc,tickers:hits,sent,src:"Yahoo Finance"};
-    });
-  }catch(e){return[];}
+    const r=await fetch(`${FINNHUB}/quote?symbol=${ticker}&token=${FKEY}`,{signal:AbortSignal.timeout(8000)});
+    if(!r.ok) throw new Error(`${r.status}`);
+    const d=await r.json();
+    if(!d.c||d.c===0) throw new Error("no data");
+    return{
+      ticker, ok:true, src:"Finnhub",
+      price:d.c, prev:d.pc, chg:d.d, chgPct:d.dp,
+      high:d.h, low:d.l, open:d.o, vol:null,
+      pre:null, after:null,
+    };
+  }catch(e){ return{ticker,ok:false,src:null}; }
 }
 
 async function fetchFinnhubNews(tickers){
-  const from=weekAgo(),to=today(),all=[],seen=new Set();
-  for(const sym of tickers.slice(0,6)){
+  const from=weekAgo(), to=today(), all=[], seen=new Set();
+  for(const sym of tickers.slice(0,8)){
     try{
-      const r=await fetch(`${FINNHUB}/company-news?symbol=${sym}&from=${from}&to=${to}&token=${FKEY}`,{signal:AbortSignal.timeout(7000)});
+      const r=await fetch(`${FINNHUB}/company-news?symbol=${sym}&from=${from}&to=${to}&token=${FKEY}`,{signal:AbortSignal.timeout(8000)});
+      if(!r.ok) continue;
       const d=await r.json();
-      if(Array.isArray(d)) d.forEach(n=>{
-        if(!seen.has(n.id)){
+      if(!Array.isArray(d)) continue;
+      d.slice(0,5).forEach(n=>{
+        if(!seen.has(n.id)&&n.headline){
           seen.add(n.id);
           const diff=Math.floor((Date.now()-n.datetime*1000)/60000);
           const ago=diff<60?`${diff}m`:diff<1440?`${Math.floor(diff/60)}h`:`${Math.floor(diff/1440)}d`;
-          const sent=/surge|soar|beat|win|gain|jump|rise|bull|record|rally/i.test(n.headline)?"bullish"
-                    :/fall|drop|miss|cut|warn|bear|decline|weak|loss|slide/i.test(n.headline)?"bearish":"neutral";
-          all.push({title:n.headline,link:n.url,ago,desc:n.summary||"",tickers:[sym],sent,src:"Finnhub"});
+          const sent=/surge|soar|beat|win|gain|jump|rise|bull|record|rally|strong|boost/i.test(n.headline)?"bullish"
+                    :/fall|drop|miss|cut|warn|bear|decline|weak|loss|slide|disappoint/i.test(n.headline)?"bearish":"neutral";
+          all.push({title:n.headline,link:n.url||"#",ago,desc:n.summary||"",tickers:[sym],sent,src:"Finnhub"});
         }
       });
     }catch(e){}
@@ -370,9 +332,8 @@ function NewsTab({tickers}){
   const load=useCallback(async()=>{
     if(loading) return;
     setLoading(true);
-    let items=await fetchNewsYahoo(tickers);
-    let source="Yahoo Finance RSS";
-    if(items.length===0){items=await fetchFinnhubNews(tickers);source="Finnhub News";}
+    let items=await fetchFinnhubNews(tickers);
+    let source="Finnhub News";
     if(items.length>0){setNews(items);setSrc(source);setLastUpd(new Date());}
     setLoading(false);
   },[tickers.join(",")]);
